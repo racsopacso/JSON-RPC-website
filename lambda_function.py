@@ -1,14 +1,28 @@
+from logging import getLogger 
 import typing as t
 
 from pydantic import BaseModel, ValidationError
 
 from methods import methods, MethodError
 
+log = getLogger(__name__)
+
 class JRPCRequest(BaseModel):
     jsonrpc: t.Literal["2.0"]
     method: str
     params: list[str]
     id: int
+
+    def run_method(self):
+        if method := methods.get(self.method):
+            try:
+                return method(*self.params)
+            
+            except MethodError as e:
+                return str(e)
+        
+        else:
+            raise ValueError(f"Unrecognised method: {self.method}")
 
 class JRPCResponse(BaseModel):
     result: str
@@ -35,40 +49,31 @@ def serialise_object(func: t.Callable[..., BaseModel | None]) -> t.Callable[...,
 
 @serialise_object
 def lambda_handler(event: dict, context) -> JRPCResponse | JRPCError | None:    
-    try:
-        event = event["body"]
-    except KeyError:
-        event = event
-
-    try:
-        request_obj = JRPCRequest.model_validate_json(event)
-    
-    except ValidationError as e:
-        return JRPCError(
-            error=f"Could not validate event: {event} due to {e}",
-            id=0,
-        )
-
-    if method := methods.get(request_obj.method, None):
+    if body := event.get("body", None):
         try:
-            ret = method(*request_obj.params)
+            request_obj = JRPCRequest.model_validate_json(body)
+        
+        except ValidationError as e:
+            log.critical(f"Could not parse event body {body}, error {e}")
+            return None
+        
+        try:
+            ret = request_obj.run_method()
 
             return JRPCResponse(
-                result=ret,
-                id=request_obj.id,
+                result = ret,
+                id=request_obj.id
             )
-
-        except MethodError as e:
+        
+        except Exception as e:
             return JRPCError(
                 error=str(e),
-                id=request_obj.id,
+                id=request_obj.id
             )
     
     else:
-        return JRPCError(
-            error=f"Unrecognised method {request_obj.method}",
-            id=request_obj.id
-        )
+        log.info(f"Event {event} lacked body field, assuming it is cors preflight and returning null")
+        return None
 
 if __name__=="__main__":
     breakpoint()
